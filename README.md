@@ -1,3 +1,11 @@
+---
+title: Vera Merchant Bot
+emoji: 🚀
+colorFrom: blue
+colorTo: indigo
+sdk: docker
+pinned: false
+---
 # Vera Merchant AI Assistant — magicpin AI Challenge
 
 ## Approach & Architecture
