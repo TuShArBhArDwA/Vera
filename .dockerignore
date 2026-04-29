@@ -1,0 +1,7 @@
+__pycache__
+.env
+.git
+.gitignore
+docs/
+dataset/
+submission.jsonl
