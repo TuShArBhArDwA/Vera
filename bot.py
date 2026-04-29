@@ -96,6 +96,14 @@ class ReplyBody(BaseModel):
 # ENDPOINTS
 # ---------------------------------------------------------------------------
 
+@app.get("/")
+async def root():
+    return {
+        "message": "Vera Merchant AI Assistant is running perfectly!",
+        "endpoints": ["/v1/healthz", "/v1/metadata", "/v1/context", "/v1/tick", "/v1/reply"],
+        "status": "ready for judge"
+    }
+
 @app.get("/v1/healthz")
 async def healthz():
     return {
