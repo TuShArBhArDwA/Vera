@@ -339,15 +339,18 @@ def compose_reply(
     msg_lower = merchant_message.lower()
     is_auto = any(re.search(p, msg_lower) for p in auto_patterns)
 
-    # Also scan history for additional auto-replies that happened before this call
+    # Also scan history for additional auto-replies (fallback if counter not passed)
     history_auto_count = sum(
         1 for t in conversation_history
         if t.get("from") in ("merchant", "customer")
         and any(re.search(p, t.get("body", "").lower()) for p in auto_patterns)
     )
 
-    # Use the max of: persistent counter passed in, history-scanned count + current flag
-    effective_auto_count = max(auto_reply_counter, history_auto_count + (1 if is_auto else 0))
+    # Combine persistent counter (from bot.py state) with the current message flag.
+    # Use persistent_counter as the authoritative source; add 1 if current msg is also auto.
+    # Fall back to history scan if persistent counter is 0 (e.g., first call).
+    base_count = max(auto_reply_counter, history_auto_count)
+    effective_auto_count = base_count + (1 if is_auto else 0)
 
     if is_auto:
         log.info("Auto-reply detected (effective_count=%d)", effective_auto_count)
