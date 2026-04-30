@@ -5,6 +5,7 @@ Gemini 2.0 Flash (primary) → Groq llama-3.3-70b (fallback)
 
 from __future__ import annotations
 import os, json, re, time, logging
+from datetime import datetime, timezone
 from typing import Optional
 from dotenv import load_dotenv
 
@@ -313,41 +314,61 @@ def compose_reply(
     conversation_history: list[dict],
     trigger: Optional[dict] = None,
     customer: Optional[dict] = None,
+    conv_id: str = "",
+    auto_reply_counter: int = 0,
 ) -> dict:
     """
     Compose a reply to a merchant/customer message in an ongoing conversation.
     Returns: {action, body, cta, rationale} where action ∈ {send, wait, end}
+
+    auto_reply_counter: persistent per-conversation count managed by bot.py.
     """
-    # Auto-reply detection
+    # Auto-reply detection — use PERSISTENT counter from bot.py
     auto_patterns = [
-        r"thank you for (contacting|reaching)",
+        r"thank you for (contacting|reaching|calling|messaging)",
         r"i('ll| will) get back to you",
-        r"our team will (respond|reply)",
+        r"our team will (respond|reply|contact)",
         r"this is an automated",
+        r"automated (assistant|message|reply|response)",
         r"aapki (jaankari|madad)",
         r"bahut.bahut shukriya",
-        r"automated (assistant|message|reply)",
+        r"hum jald (hi )?(aapse )?sampark karenge",
+        r"we will (contact|reach|get back)",
+        r"you have reached",
     ]
     msg_lower = merchant_message.lower()
-
-    auto_count = sum(
-        1 for t in conversation_history
-        if t.get("from") == "merchant" and any(re.search(p, t.get("body", "").lower()) for p in auto_patterns)
-    )
     is_auto = any(re.search(p, msg_lower) for p in auto_patterns)
-    if is_auto:
-        auto_count += 1
 
-    if auto_count >= 2:
+    # Also scan history for additional auto-replies that happened before this call
+    history_auto_count = sum(
+        1 for t in conversation_history
+        if t.get("from") in ("merchant", "customer")
+        and any(re.search(p, t.get("body", "").lower()) for p in auto_patterns)
+    )
+
+    # Use the max of: persistent counter passed in, history-scanned count + current flag
+    effective_auto_count = max(auto_reply_counter, history_auto_count + (1 if is_auto else 0))
+
+    if is_auto:
+        log.info("Auto-reply detected (effective_count=%d)", effective_auto_count)
+
+    if effective_auto_count >= 3:
+        # 3+ auto-replies → hard exit
         return {"action": "end", "body": None, "cta": "none",
-                "rationale": "Detected repeated auto-reply — gracefully exiting to avoid wasting turns"}
-    if auto_count == 1:
-        # One probe attempt
+                "rationale": "Detected 3+ consecutive auto-replies — gracefully exiting"}
+
+    if effective_auto_count == 2:
+        # 2nd auto-reply → end (we already sent one probe after the first)
+        return {"action": "end", "body": None, "cta": "none",
+                "rationale": "Detected repeated auto-reply after probe — exiting gracefully"}
+
+    if effective_auto_count == 1 and is_auto:
+        # First auto-reply detected — send exactly ONE probe
         identity = merchant.get("identity", {})
         name = identity.get("owner_first_name") or identity.get("name", "")
         probe = f"Samajh gayi! {name} ji, kya aap personally dekhna chahenge ki main kya suggest kar rahi hoon? 2 minute ka kaam hai. Chalega?"
         return {"action": "send", "body": probe, "cta": "binary_yes_stop",
-                "rationale": "Detected auto-reply, sending one probe to reach real owner"}
+                "rationale": "First auto-reply detected — sending one probe to reach real owner"}
 
     # Hostile / not-interested detection
     hostile_patterns = [
@@ -359,25 +380,39 @@ def compose_reply(
         return {"action": "end", "body": None, "cta": "none",
                 "rationale": "Merchant signalled not interested — respecting their preference and exiting"}
 
-    # Commitment / intent-to-act detection
+    # Commitment / intent-to-act detection (expanded)
     commitment_patterns = [
         r"\byes\b", r"\bok\b", r"\blet'?s do\b", r"\bgo ahead\b", r"\bproceed\b",
         r"\bkaro\b", r"\bchalo\b", r"\bkarte hain\b", r"\bsend\b", r"\bconfirm\b",
-        r"what'?s next", r"theek hai", r"bilkul",
+        r"what'?s next", r"theek hai", r"bilkul", r"\bbook\b", r"book me",
+        r"please (book|schedule|reserve|confirm|send|do it)",
+        r"(i'?d? |i )(like|want|need) (to|a )",
+        r"sounds good", r"that works", r"sure",
     ]
     is_commitment = any(re.search(p, msg_lower) for p in commitment_patterns)
 
-    system_reply = """You are Vera responding in a live WhatsApp conversation with a merchant.
+    # Determine the role this message comes from (merchant or customer)
+    from_role = "customer" if customer else "merchant"
 
-RULES:
-- If merchant committed/said yes: switch to ACTION mode immediately. Tell them exactly what you're doing. No more qualifying questions.
-- If merchant asked a question: answer it directly from context. No redirect.
-- Keep it short — 1-4 sentences max.
-- Match merchant's language (Hindi-English mix if they're using it).
-- NEVER re-introduce yourself.
+    system_reply = """You are Vera responding in a live WhatsApp conversation with a merchant or customer.
+
+CRITICAL RULES (violations cause score deductions):
+1. If merchant/customer committed (said yes/ok/let's do it/go ahead/book me/proceed): SWITCH TO ACTION MODE IMMEDIATELY.
+   - Tell them exactly what you're doing or confirm the action.
+   - Do NOT ask any more qualifying questions.
+   - Do NOT say "could you tell me...", "would you like...", "do you want...".
+2. If they asked a factual question: answer it directly from context. No redirect, no hedging.
+3. If they gave a date/time for booking: ACCEPT IT as valid. Never question if a date is in the past unless you are CERTAIN it's before today. When in doubt, accept the date.
+4. Keep it short — 1-4 sentences max.
+5. Match merchant's language (Hinglish if they're using it).
+6. NEVER re-introduce yourself.
+7. Never hallucinate data not in context.
 
 Output ONLY this JSON:
 {"action": "send"|"wait"|"end", "body": "<reply or null>", "cta": "binary_yes_stop"|"open_ended"|"none", "rationale": "<1 sentence>"}"""
+
+    # Inject current date so the LLM never incorrectly treats a future date as past
+    current_date_str = datetime.now(timezone.utc).strftime("%A, %d %B %Y")
 
     identity = merchant.get("identity", {})
     history_text = "\n".join(
@@ -385,17 +420,30 @@ Output ONLY this JSON:
     )
     active_offers = [o["title"] for o in merchant.get("offers", []) if o.get("status") == "active"]
 
-    reply_prompt = f"""Merchant: {identity.get('name')} ({identity.get('city')})
+    # Customer info for customer-facing replies
+    customer_block = ""
+    if customer:
+        cid = customer.get("identity", {})
+        rel = customer.get("relationship", {})
+        customer_block = f"""
+Customer: {cid.get('name')} | language: {cid.get('language_pref')}
+State: {customer.get('state')} | last visit: {rel.get('last_visit')} | preferences: {customer.get('preferences', {})}
+"""
+
+    reply_prompt = f"""TODAY'S DATE: {current_date_str}
+IMPORTANT: Any date mentioned by the merchant/customer that is on or after today is a FUTURE date and should be ACCEPTED as valid.
+
+Merchant: {identity.get('name')} ({identity.get('city')})
 Active offers: {active_offers}
 Signals: {merchant.get('signals', [])}
 Is commitment message: {is_commitment}
-
+{customer_block}
 Conversation so far:
 {history_text}
 
-Merchant just said: "{merchant_message}"
+Incoming message (from {from_role}): "{merchant_message}"
 
-{"IMPORTANT: Merchant has committed. Switch to action mode NOW." if is_commitment else ""}
+{"IMPORTANT: This is a COMMITMENT/BOOKING message. Switch to action mode NOW. Do NOT ask qualifying questions." if is_commitment else ""}
 
 Compose your reply."""
 

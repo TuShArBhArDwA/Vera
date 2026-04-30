@@ -37,11 +37,14 @@ START_TIME = time.time()
 # (scope, context_id) → {version: int, payload: dict}
 contexts: Dict[tuple, Dict] = {}
 
-# conversation_id → {merchant_id, customer_id, turns: list, sent_bodies: list, auto_reply_count: int}
+# conversation_id → {merchant_id, customer_id, turns: list, sent_bodies: list, auto_reply_count: int, probe_sent: bool}
 conversations: Dict[str, Dict] = {}
 
 # suppression: set of keys we've already sent
 sent_suppression_keys: set = set()
+
+# Auto-reply spam counter per conversation: conv_id → count of consecutive auto-replies
+auto_reply_counters: Dict[str, int] = {}
 
 
 # ---------------------------------------------------------------------------
@@ -172,10 +175,12 @@ async def tick(body: TickBody):
             log.info("Skipping suppressed trigger: %s", sup_key)
             continue
 
-        merchant_id = trigger.get("merchant_id")
-        customer_id = trigger.get("customer_id")
+        # merchant_id can be at top level OR inside payload (both schema variants exist)
+        merchant_id = trigger.get("merchant_id") or trigger.get("payload", {}).get("merchant_id")
+        customer_id = trigger.get("customer_id") or trigger.get("payload", {}).get("customer_id")
 
         if not merchant_id:
+            log.warning("Trigger %s has no merchant_id — skipping", trg_id)
             continue
 
         # Don't start a new conversation if one is already active for this merchant
@@ -185,11 +190,13 @@ async def tick(body: TickBody):
 
         merchant = _get_payload("merchant", merchant_id)
         if not merchant:
+            log.warning("No merchant context for %s — skipping trigger %s", merchant_id, trg_id)
             continue
 
         cat_slug = merchant.get("category_slug")
         category = _get_payload("category", cat_slug)
         if not category:
+            log.warning("No category context for slug=%s — skipping trigger %s", cat_slug, trg_id)
             continue
 
         customer = _get_payload("customer", customer_id) if customer_id else None
@@ -213,7 +220,9 @@ async def tick(body: TickBody):
             "turns": [{"from": "vera", "body": result["body"], "ts": body.now}],
             "sent_bodies": [result["body"]],
             "auto_reply_count": 0,
+            "probe_sent": False,
         }
+        auto_reply_counters[conv_id] = 0
 
         # Template name based on trigger kind
         kind = trigger.get("kind", "generic")
@@ -259,8 +268,10 @@ async def reply(body: ReplyBody):
             "turns": [],
             "sent_bodies": [],
             "auto_reply_count": 0,
+            "probe_sent": False,
         }
         conv = conversations[conv_id]
+        auto_reply_counters.setdefault(conv_id, 0)
 
     # Snapshot history BEFORE appending the incoming message
     # (compose_reply does its own auto-reply count on prior turns;
@@ -294,6 +305,8 @@ async def reply(body: ReplyBody):
             conversation_history=history_snapshot,  # history BEFORE this turn
             trigger=trigger,
             customer=customer,
+            conv_id=conv_id,
+            auto_reply_counter=auto_reply_counters.get(conv_id, 0),
         )
     except Exception as e:
         log.error("Reply compose error: %s", e)
@@ -305,6 +318,21 @@ async def reply(body: ReplyBody):
         }
 
     action = result.get("action", "send")
+
+    # Increment persistent auto-reply counter if this message looks like an auto-reply
+    # (composer already computed effective_auto_count but we need to persist it)
+    auto_patterns_check = [
+        "thank you for contacting", "our team will", "this is an automated",
+        "automated assistant", "aapki jaankari", "bahut-bahut shukriya",
+        "we will contact", "you have reached", "i'll get back",
+    ]
+    msg_lower_check = body.message.lower()
+    if any(p in msg_lower_check for p in auto_patterns_check):
+        auto_reply_counters[conv_id] = auto_reply_counters.get(conv_id, 0) + 1
+        log.info("Auto-reply counter for %s: %d", conv_id, auto_reply_counters[conv_id])
+    else:
+        # Non-auto-reply resets the counter
+        auto_reply_counters[conv_id] = 0
 
     # Anti-repetition guard
     if action == "send" and result.get("body"):
@@ -319,6 +347,7 @@ async def reply(body: ReplyBody):
     if action == "end":
         log.info("Conversation %s ended", conv_id)
         conversations.pop(conv_id, None)
+        auto_reply_counters.pop(conv_id, None)
         return {"action": "end", "rationale": result.get("rationale", "Conversation closed")}
 
     if action == "wait":
@@ -342,6 +371,7 @@ async def teardown():
     contexts.clear()
     conversations.clear()
     sent_suppression_keys.clear()
+    auto_reply_counters.clear()
     log.info("State wiped on teardown")
     return {"status": "wiped"}
 
