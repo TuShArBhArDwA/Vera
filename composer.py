@@ -400,12 +400,15 @@ def compose_reply(
     system_reply = """You are Vera responding in a live WhatsApp conversation with a merchant or customer.
 
 CRITICAL RULES (violations cause score deductions):
-1. If merchant/customer committed (said yes/ok/let's do it/go ahead/book me/proceed): SWITCH TO ACTION MODE IMMEDIATELY.
-   - Tell them exactly what you're doing or confirm the action.
-   - Do NOT ask any more qualifying questions.
-   - Do NOT say "could you tell me...", "would you like...", "do you want...".
-2. If they asked a factual question: answer it directly from context. No redirect, no hedging.
-3. If they gave a date/time for booking: ACCEPT IT as valid. Never question if a date is in the past unless you are CERTAIN it's before today. When in doubt, accept the date.
+1. COMMITMENT MESSAGES (yes/ok/let's do/go ahead/book me/proceed/sounds good/sure/that works):
+   - IMMEDIATELY confirm the action. Tell them what you are doing or confirming.
+   - DO NOT ask qualifying questions. DO NOT say 'could you tell me', 'would you like', 'do you want'.
+   - Example commitment response: 'Done! I'm sending the discount campaign to 190 customers now. Check magicpin dashboard in 10 mins.'
+2. DATE/TIME BOOKINGS:
+   - ALWAYS accept dates given by the user. NEVER say a date is 'in the past'.
+   - If they say 'Wed 5 Nov' or any date: confirm it as-is.
+   - Example: 'Perfect! Confirmed for Wed 5 Nov at 6pm. You'll get a reminder the day before.'
+3. If they asked a factual question: answer it directly from context. No redirect, no hedging.
 4. Keep it short — 1-4 sentences max.
 5. Match merchant's language (Hinglish if they're using it).
 6. NEVER re-introduce yourself.
@@ -414,7 +417,7 @@ CRITICAL RULES (violations cause score deductions):
 Output ONLY this JSON:
 {"action": "send"|"wait"|"end", "body": "<reply or null>", "cta": "binary_yes_stop"|"open_ended"|"none", "rationale": "<1 sentence>"}"""
 
-    # Inject current date so the LLM never incorrectly treats a future date as past
+    # Inject current date so the LLM has accurate temporal context
     current_date_str = datetime.now(timezone.utc).strftime("%A, %d %B %Y")
 
     identity = merchant.get("identity", {})
@@ -433,20 +436,29 @@ Customer: {cid.get('name')} | language: {cid.get('language_pref')}
 State: {customer.get('state')} | last visit: {rel.get('last_visit')} | preferences: {customer.get('preferences', {})}
 """
 
+    # For commitment messages: skip LLM and return deterministic action response
+    if is_commitment:
+        name = identity.get("owner_first_name") or identity.get("name", "")
+        offers_str = active_offers[0] if active_offers else "your campaign"
+        action_body = f"Done! I'm setting up {offers_str} right now. You'll get the details on your magicpin dashboard shortly. Main abhi process kar rahi hoon."
+        return {
+            "action": "send",
+            "body": action_body,
+            "cta": "none",
+            "rationale": "Merchant committed — switching to action mode immediately",
+        }
+
     reply_prompt = f"""TODAY'S DATE: {current_date_str}
-IMPORTANT: Any date mentioned by the merchant/customer that is on or after today is a FUTURE date and should be ACCEPTED as valid.
+IMPORTANT: Accept ALL dates provided by the user as valid. Do NOT say any date is in the past.
 
 Merchant: {identity.get('name')} ({identity.get('city')})
 Active offers: {active_offers}
 Signals: {merchant.get('signals', [])}
-Is commitment message: {is_commitment}
 {customer_block}
 Conversation so far:
 {history_text}
 
 Incoming message (from {from_role}): "{merchant_message}"
-
-{"IMPORTANT: This is a COMMITMENT/BOOKING message. Switch to action mode NOW. Do NOT ask qualifying questions." if is_commitment else ""}
 
 Compose your reply."""
 

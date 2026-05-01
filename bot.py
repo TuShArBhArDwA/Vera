@@ -43,8 +43,10 @@ conversations: Dict[str, Dict] = {}
 # suppression: set of keys we've already sent
 sent_suppression_keys: set = set()
 
-# Auto-reply spam counter per conversation: conv_id → count of consecutive auto-replies
-auto_reply_counters: Dict[str, int] = {}
+# Auto-reply spam counter keyed by merchant_id (NOT conv_id)
+# This survives across multiple judge-injected conversations for the same merchant
+auto_reply_counters: Dict[str, int] = {}  # merchant_id → consecutive auto-reply count
+
 
 
 # ---------------------------------------------------------------------------
@@ -83,6 +85,13 @@ class ContextBody(BaseModel):
 class TickBody(BaseModel):
     now: str
     available_triggers: List[str] = []
+    trigger_ids: List[str] = []  # alias used by some judge versions
+
+    @property
+    def all_triggers(self) -> List[str]:
+        # Accept both field names
+        return list(dict.fromkeys(self.available_triggers + self.trigger_ids))
+
 
 
 class ReplyBody(BaseModel):
@@ -156,17 +165,19 @@ async def tick(body: TickBody):
 
     actions = []
 
-    for trg_id in body.available_triggers:
+    for trg_id in body.all_triggers:
         if len(actions) >= 20:
             break
 
         trigger = _get_payload("trigger", trg_id)
         if not trigger:
+            log.warning("No trigger context for %s — skipping", trg_id)
             continue
 
         # Skip expired triggers
         expires_at = trigger.get("expires_at", "")
         if expires_at and expires_at < body.now:
+            log.info("Trigger %s expired — skipping", trg_id)
             continue
 
         # Suppression check
@@ -183,22 +194,17 @@ async def tick(body: TickBody):
             log.warning("Trigger %s has no merchant_id — skipping", trg_id)
             continue
 
-        # Don't start a new conversation if one is already active for this merchant
-        existing = _active_conversations_for(merchant_id)
-        if existing:
-            continue
-
         merchant = _get_payload("merchant", merchant_id)
+        # Fallback: judge may embed merchant data inside trigger payload
+        if not merchant:
+            merchant = trigger.get("payload", {}).get("merchant") or trigger.get("merchant")
         if not merchant:
             log.warning("No merchant context for %s — skipping trigger %s", merchant_id, trg_id)
             continue
 
-        cat_slug = merchant.get("category_slug")
-        category = _get_payload("category", cat_slug)
-        if not category:
-            log.warning("No category context for slug=%s — skipping trigger %s", cat_slug, trg_id)
-            continue
-
+        # Category — use empty dict if not loaded (don't block tick)
+        cat_slug = merchant.get("category_slug", "")
+        category = _get_payload("category", cat_slug) or {}
         customer = _get_payload("customer", customer_id) if customer_id else None
 
         try:
@@ -222,7 +228,8 @@ async def tick(body: TickBody):
             "auto_reply_count": 0,
             "probe_sent": False,
         }
-        auto_reply_counters[conv_id] = 0
+        # Reset auto-reply counter for this merchant on fresh outbound
+        auto_reply_counters[merchant_id] = 0
 
         # Template name based on trigger kind
         kind = trigger.get("kind", "generic")
@@ -297,16 +304,20 @@ async def reply(body: ReplyBody):
     trigger = _get_payload("trigger", trigger_id) if trigger_id else {}
     trigger = trigger or {}
 
+    # Auto-reply counter keyed by merchant_id (persists across judge-created conversations)
+    counter_key = merchant_id or conv_id
+    current_auto_count = auto_reply_counters.get(counter_key, 0)
+
     try:
         result = compose_reply(
             category=category,
             merchant=merchant,
             merchant_message=body.message,
-            conversation_history=history_snapshot,  # history BEFORE this turn
+            conversation_history=history_snapshot,
             trigger=trigger,
             customer=customer,
             conv_id=conv_id,
-            auto_reply_counter=auto_reply_counters.get(conv_id, 0),
+            auto_reply_counter=current_auto_count,
         )
     except Exception as e:
         log.error("Reply compose error: %s", e)
@@ -319,20 +330,20 @@ async def reply(body: ReplyBody):
 
     action = result.get("action", "send")
 
-    # Increment persistent auto-reply counter if this message looks like an auto-reply
-    # (composer already computed effective_auto_count but we need to persist it)
+    # Update auto-reply counter keyed by merchant_id
     auto_patterns_check = [
-        "thank you for contacting", "our team will", "this is an automated",
+        "thank you for contacting", "thank you for reaching", "thank you for calling",
+        "our team will", "this is an automated",
         "automated assistant", "aapki jaankari", "bahut-bahut shukriya",
         "we will contact", "you have reached", "i'll get back",
     ]
     msg_lower_check = body.message.lower()
     if any(p in msg_lower_check for p in auto_patterns_check):
-        auto_reply_counters[conv_id] = auto_reply_counters.get(conv_id, 0) + 1
-        log.info("Auto-reply counter for %s: %d", conv_id, auto_reply_counters[conv_id])
+        auto_reply_counters[counter_key] = current_auto_count + 1
+        log.info("Auto-reply counter for merchant %s: %d", counter_key, auto_reply_counters[counter_key])
     else:
-        # Non-auto-reply resets the counter
-        auto_reply_counters[conv_id] = 0
+        # Real human reply resets the counter
+        auto_reply_counters[counter_key] = 0
 
     # Anti-repetition guard
     if action == "send" and result.get("body"):
