@@ -128,11 +128,11 @@ async def healthz():
 @app.get("/v1/metadata")
 async def metadata():
     return {
-        "team_name": "Vera Enhanced",
+        "team_name": "Mini Anon",
         "team_members": ["Tushar Bhardwaj"],
         "model": "gemini-2.5-flash (primary) + groq/llama-3.3-70b (fallback)",
         "approach": "4-context composer with trigger-kind routing, auto-reply detection, intent-transition handling",
-        "contact_email": "tushar@example.com",
+        "contact_email": "tusharbhardwaj2617@gmail.com",
         "version": "1.0.0",
         "submitted_at": datetime.utcnow().isoformat() + "Z",
     }
