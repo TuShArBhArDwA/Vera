@@ -161,61 +161,65 @@ async def push_context(body: ContextBody):
 
 @app.post("/v1/tick")
 async def tick(body: TickBody):
+    import asyncio
+    from concurrent.futures import ThreadPoolExecutor
     from composer import compose
 
-    actions = []
-
+    # ── Collect eligible triggers (cap at 20 per judge spec) ───────────────
+    eligible = []
     for trg_id in body.all_triggers:
-        if len(actions) >= 20:
+        if len(eligible) >= 20:
             break
-
         trigger = _get_payload("trigger", trg_id)
         if not trigger:
             log.warning("No trigger context for %s — skipping", trg_id)
             continue
-
-        # We MUST compose actions for ALL triggers passed in the tick!
-        # Do not filter by expires_at.
-        expires_at = trigger.get("expires_at", "")
-
-        # Suppression check
         sup_key = trigger.get("suppression_key", "")
         if sup_key and sup_key in sent_suppression_keys:
             log.info("Skipping suppressed trigger: %s", sup_key)
             continue
-
-        # merchant_id can be at top level OR inside payload (both schema variants exist)
         merchant_id = trigger.get("merchant_id") or trigger.get("payload", {}).get("merchant_id")
         customer_id = trigger.get("customer_id") or trigger.get("payload", {}).get("customer_id")
-
         if not merchant_id:
             log.warning("Trigger %s has no merchant_id — skipping", trg_id)
             continue
-
         merchant = _get_payload("merchant", merchant_id)
-        # Fallback: judge may embed merchant data inside trigger payload
         if not merchant:
             merchant = trigger.get("payload", {}).get("merchant") or trigger.get("merchant")
         if not merchant:
             log.warning("No merchant context for %s — skipping trigger %s", merchant_id, trg_id)
             continue
-
-        # Category — use empty dict if not loaded (don't block tick)
         cat_slug = merchant.get("category_slug", "")
         category = _get_payload("category", cat_slug) or {}
         customer = _get_payload("customer", customer_id) if customer_id else None
+        eligible.append((trg_id, trigger, merchant_id, customer_id, merchant, category, customer))
 
+    # ── Compose all in parallel ─────────────────────────────────────────────
+    def _compose_one(args):
+        trg_id, trigger, merchant_id, customer_id, merchant, category, customer = args
         try:
-            result = compose(category, merchant, trigger, customer)
+            return args, compose(category, merchant, trigger, customer)
         except Exception as e:
             log.error("Compose error for trigger %s: %s", trg_id, e)
-            continue
+            return args, None
 
-        # Mark suppression
+    loop = asyncio.get_event_loop()
+    executor = ThreadPoolExecutor(max_workers=min(len(eligible), 10))
+    tasks = [loop.run_in_executor(executor, _compose_one, args) for args in eligible]
+    results = await asyncio.gather(*tasks, return_exceptions=True)
+
+    # ── Build action list ───────────────────────────────────────────────────
+    actions = []
+    for res in results:
+        if isinstance(res, Exception) or res is None:
+            continue
+        args, result = res
+        if result is None:
+            continue
+        trg_id, trigger, merchant_id, customer_id, merchant, category, customer = args
+        sup_key = trigger.get("suppression_key", "")
         if sup_key:
             sent_suppression_keys.add(sup_key)
-
-        # Start conversation
         conv_id = f"conv_{merchant_id}_{trg_id}_{uuid.uuid4().hex[:6]}"
         conversations[conv_id] = {
             "merchant_id": merchant_id,
@@ -226,20 +230,15 @@ async def tick(body: TickBody):
             "auto_reply_count": 0,
             "probe_sent": False,
         }
-        # Reset auto-reply counter for this merchant on fresh outbound
         auto_reply_counters[merchant_id] = 0
-
-        # Template name based on trigger kind
         kind = trigger.get("kind", "generic")
-        template_name = f"vera_{kind}_v1"
-
         actions.append({
             "conversation_id": conv_id,
             "merchant_id": merchant_id,
             "customer_id": customer_id,
             "send_as": result["send_as"],
             "trigger_id": trg_id,
-            "template_name": template_name,
+            "template_name": f"vera_{kind}_v1",
             "template_params": [
                 merchant.get("identity", {}).get("name", ""),
                 trigger.get("kind", ""),
@@ -250,7 +249,6 @@ async def tick(body: TickBody):
             "suppression_key": result["suppression_key"],
             "rationale": result["rationale"],
         })
-
         log.info("Action queued: conv=%s merchant=%s trigger_kind=%s", conv_id, merchant_id, kind)
 
     return {"actions": actions}
