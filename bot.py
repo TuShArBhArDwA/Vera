@@ -318,6 +318,7 @@ async def reply(body: ReplyBody):
             customer=customer,
             conv_id=conv_id,
             auto_reply_counter=current_auto_count,
+            from_role=body.from_role,
         )
     except Exception as e:
         log.error("Reply compose error: %s", e)
