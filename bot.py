@@ -174,11 +174,9 @@ async def tick(body: TickBody):
             log.warning("No trigger context for %s — skipping", trg_id)
             continue
 
-        # Skip expired triggers
+        # We MUST compose actions for ALL triggers passed in the tick!
+        # Do not filter by expires_at.
         expires_at = trigger.get("expires_at", "")
-        if expires_at and expires_at < body.now:
-            log.info("Trigger %s expired — skipping", trg_id)
-            continue
 
         # Suppression check
         sup_key = trigger.get("suppression_key", "")
@@ -287,7 +285,7 @@ async def reply(body: ReplyBody):
 
     # Record incoming turn
     conv["turns"].append({
-        "from": body.from_role,
+        "from": body.from_role.lower(),
         "body": body.message,
         "ts": body.received_at,
     })
@@ -318,7 +316,7 @@ async def reply(body: ReplyBody):
             customer=customer,
             conv_id=conv_id,
             auto_reply_counter=current_auto_count,
-            from_role=body.from_role,
+            from_role=body.from_role.lower(),
         )
     except Exception as e:
         log.error("Reply compose error: %s", e)
@@ -359,7 +357,7 @@ async def reply(body: ReplyBody):
     if action == "end":
         log.info("Conversation %s ended", conv_id)
         conversations.pop(conv_id, None)
-        auto_reply_counters.pop(conv_id, None)
+        auto_reply_counters.pop(counter_key, None)
         return {"action": "end", "rationale": result.get("rationale", "Conversation closed")}
 
     if action == "wait":

@@ -102,30 +102,206 @@ RESPOND WITH EXACTLY THIS JSON (no markdown, no explanation outside JSON):
 # ---------------------------------------------------------------------------
 
 KIND_INSTRUCTIONS = {
-    "research_digest": "Lead with the specific research finding (source, trial_n, % stat). Offer to pull it and draft patient-ed content. CTA: open_ended.",
-    "perf_dip": "Name the exact metric that dropped and by how much vs peer benchmark. Frame as loss aversion — they're losing visibility right now. CTA: binary_yes_stop.",
-    "perf_spike": "Celebrate the spike with the specific number. Then pivot: 'let\'s lock in this momentum' with one concrete next action. CTA: open_ended.",
-    "milestone_reached": "Name the milestone. Use social proof ('you\'re now in the top X% of <locality> <category>'). Low-friction follow-on ask. CTA: open_ended.",
-    "competitor_opened": "Voyeur curiosity — a new <category> opened nearby. Don't name if not in context. Frame as 'want to see how you compare?'. CTA: binary_yes_stop.",
-    "festival_upcoming": "Name the festival and exact days remaining. Offer a ready-to-post campaign — effort externalization ('I\'ve drafted it, just say go'). CTA: binary_yes_stop.",
-    "recall_due": "This is customer-facing (send_as=merchant_on_behalf). Name the patient, time since last visit, offer 2 concrete slots with price. CTA: open_ended (slot choice).",
-    "customer_lapsed_soft": "Customer-facing. Warm re-engagement — name patient, time lapsed, one specific offer. CTA: binary_yes_stop.",
-    "appointment_tomorrow": "Customer-facing. Reminder with specific time, address hint, any prep notes from category. CTA: open_ended.",
-    "dormant_with_vera": "Merchant hasn't engaged in N days. Curiosity re-engage — ask one interesting question about their business this week. CTA: open_ended.",
-    "review_theme_emerged": "Name the theme and how many reviews mentioned it this week. Frame as insight, offer to act. CTA: binary_yes_stop.",
-    "renewal_due": "Days remaining front-loaded. What they'll lose if subscription lapses (visibility, leads). CTA: binary_yes_stop.",
-    "curious_ask_due": "Ask one genuinely curious, non-promotional question about their business (busiest day, most-asked service, a challenge they're facing). No CTA.",
-    "chronic_refill_due": "Pharmacy customer-facing. Refill reminder for their medication. Specific timing, offer convenience. CTA: binary_yes_stop.",
-    "trial_followup": "Check in on their experience. Ask what's working. Social proof of what similar merchants did. CTA: open_ended.",
-    # ── newly-added kinds the judge may inject ──────────────────────────────
-    "regulation_change": "Lead with the specific regulation/authority/effective date from the payload. Frame as must-know compliance update for their practice. Offer to draft a patient notice or compliance checklist (effort externalization). CTA: binary_yes_stop.",
-    "ipl_match_today": "IPL match today — high-engagement social/footfall moment. Name the teams if in payload. For food/restaurant: draft a match-day combo. Any business: topical WhatsApp story or in-store promo. Effort externalization: 'I\'ve drafted the post — just say go'. CTA: binary_yes_stop.",
-    "weather_heatwave": "Lead with the actual temperature from payload. Frame impact on local footfall or demand (heat → cold drinks, indoors, specific services). One ready-to-deploy action. CTA: binary_yes_stop.",
-    "local_news_event": "Name the specific local event/news from payload. Frame traffic/footfall implications for this merchant type. One concrete recommendation. CTA: open_ended.",
-    "category_trend_movement": "Lead with the % movement in search trends from payload. Frame as untapped demand in their locality right now. One concrete action to capture it. CTA: binary_yes_stop.",
+    # ── Core internal triggers ───────────────────────────────────────────────
+    "research_digest": (
+        "Lead with the EXACT finding from the digest item: source name, trial_n, and % stat. "
+        "E.g. '2,100-patient JIDA trial: 3-mo fluoride recall cuts caries 38% better.' "
+        "Offer to pull abstract + draft a patient-education WhatsApp. "
+        "Effort externalization: I have it ready, just say go. CTA: open_ended."
+    ),
+    "perf_dip": (
+        "Open with EXACT numbers: metric, delta_pct as %, vs_baseline count. "
+        "E.g. 'Calls are down 50% this week (6 vs baseline 12).' "
+        "Frame as loss aversion: losing leads RIGHT NOW vs peer median. "
+        "One concrete fix. CTA: binary_yes_stop."
+    ),
+    "perf_spike": (
+        "Name metric and exact delta_pct as %. Celebrate briefly. "
+        "Pivot: let us lock this in — one concrete next action. "
+        "Use likely_driver from payload if present. CTA: open_ended."
+    ),
+    "milestone_reached": (
+        "If is_imminent=true: X reviews away from milestone — push it over the line. "
+        "If crossed: celebrate + social proof (top X% in locality). "
+        "Name the exact value_now and milestone_value. CTA: open_ended."
+    ),
+    "competitor_opened": (
+        "Name competitor_name and their offer price if in payload. "
+        "State distance_km. Voyeur curiosity: want to see how you compare? "
+        "CTA: binary_yes_stop."
+    ),
+    "festival_upcoming": (
+        "Name festival and EXACT days_until count. "
+        "Effort externalization: I have drafted a campaign, just say go. "
+        "CTA: binary_yes_stop."
+    ),
+    "recall_due": (
+        "Customer-facing (send_as=merchant_on_behalf). Name service_due and due_date. "
+        "Offer available_slots as explicit choice (e.g. Wed 6 Nov 6pm or Thu 7 Nov 5pm). "
+        "Include price from active offers. CTA: open_ended (slot pick)."
+    ),
+    "customer_lapsed_soft": (
+        "Customer-facing. Name patient, days/months since last visit. "
+        "One specific offer with price. Warm tone. CTA: binary_yes_stop."
+    ),
+    "customer_lapsed_hard": (
+        "Customer-facing re-engagement. State days_since_last_visit. "
+        "Reference previous_focus. Empathetic, no pressure. "
+        "One concrete low-friction return action. CTA: binary_yes_stop."
+    ),
+    "appointment_tomorrow": (
+        "Customer-facing. Confirm specific time, include address hint. "
+        "Any prep notes from category context. Short. CTA: open_ended."
+    ),
+    "dormant_with_vera": (
+        "Merchant silent for days_since_last_merchant_message days. "
+        "Reference last_topic if present. Ask ONE curious non-promotional question "
+        "about their business this week. No CTA."
+    ),
+    "review_theme_emerged": (
+        "Name exact theme and occurrences_30d count. Quote common_quote verbatim if present. "
+        "Frame as insight: X customers mentioned Y this month. "
+        "Offer to draft a response template. CTA: binary_yes_stop."
+    ),
+    "renewal_due": (
+        "Front-load days_remaining from payload. Name renewal_amount in rupees. "
+        "Loss aversion: exactly what lapses (leads, visibility, ranking). "
+        "CTA: binary_yes_stop."
+    ),
+    "curious_ask_due": (
+        "Ask exactly ONE genuinely curious non-promotional question. "
+        "Use ask_template hint from payload (e.g. what_service_in_demand_this_week). "
+        "No CTA. Conversational."
+    ),
+    "chronic_refill_due": (
+        "Pharmacy customer-facing. List molecule_list items by name. "
+        "State stock_runs_out date. Offer convenience pickup. CTA: binary_yes_stop."
+    ),
+    "trial_followup": (
+        "Reference trial_date. Offer next_session_options with exact label. "
+        "Social proof: what similar members did after trial. CTA: open_ended."
+    ),
+    # ── Extended kinds from seed dataset ────────────────────────────────────
+    "regulation_change": (
+        "Lead with the specific regulation from the digest item referenced by top_item_id: "
+        "authority name, what changed, deadline_iso formatted as readable date. "
+        "Frame as must-act compliance. Effort externalization: I can draft the patient "
+        "notice or compliance checklist. CTA: binary_yes_stop."
+    ),
+    "ipl_match_today": (
+        "Name the exact match (teams + venue) from payload. "
+        "State match_time in readable local time. "
+        "Frame as footfall/social moment: restaurants offer match-day combo, "
+        "any business gets a topical WhatsApp story. "
+        "Effort externalization: I have drafted the post, say go. CTA: binary_yes_stop."
+    ),
+    "wedding_package_followup": (
+        "Reference wedding_date and days_to_wedding count. Mention trial_completed date. "
+        "Name the next_step_window_open milestone. Frame urgency: bridal slots fill up "
+        "6-8 weeks before. CTA: binary_yes_stop."
+    ),
+    "winback_eligible": (
+        "Open with days_since_expiry and lapsed_customers_added_since_expiry count. "
+        "State perf_dip_pct as % loss. Loss aversion: X new customers came in since you "
+        "paused — you missed them. One reactivation action. CTA: binary_yes_stop."
+    ),
+    "active_planning_intent": (
+        "Merchant already expressed intent on intent_topic. Quote merchant_last_message. "
+        "Move IMMEDIATELY to action — present first step or draft. "
+        "DO NOT qualify further. CTA: open_ended (next concrete step)."
+    ),
+    "seasonal_perf_dip": (
+        "Acknowledge is_expected_seasonal + season_note, then reframe: "
+        "top performers counter this with one specific action. "
+        "Name delta_pct. CTA: binary_yes_stop."
+    ),
+    "supply_alert": (
+        "Pharmacy-facing. Name molecule and affected_batches list. "
+        "Frame as patient-safety action: check stock, notify affected patients. "
+        "Offer to draft patient notification. CTA: binary_yes_stop."
+    ),
+    "category_seasonal": (
+        "Lead with the top trend stat from trends list (e.g. ORS demand +40% this summer). "
+        "Frame as stock or campaign opportunity. One concrete recommendation. "
+        "CTA: binary_yes_stop."
+    ),
+    "gbp_unverified": (
+        "State estimated_uplift_pct as % visibility gain from verifying GBP. "
+        "Name verification_path (postcard or phone call). "
+        "Effort externalization: takes 5 minutes, I will guide step by step. "
+        "CTA: binary_yes_stop."
+    ),
+    "cde_opportunity": (
+        "Name the webinar/event from digest. State credits earned and fee (free if applicable). "
+        "Frame as professional credibility: peers are attending. CTA: binary_yes_stop."
+    ),
+    "weather_heatwave": (
+        "Lead with actual temperature from payload. Frame impact on footfall or demand. "
+        "One ready-to-deploy action. CTA: binary_yes_stop."
+    ),
+    "local_news_event": (
+        "Name the specific local event from payload. Frame footfall implications. "
+        "One concrete recommendation. CTA: open_ended."
+    ),
+    "category_trend_movement": (
+        "Lead with % movement in search trends from payload. "
+        "Frame as untapped demand in their locality. One concrete capture action. "
+        "CTA: binary_yes_stop."
+    ),
 }
 
-DEFAULT_KIND_INSTRUCTION = "Compose a contextually relevant message using the trigger payload. Make it specific and actionable. CTA: open_ended."
+DEFAULT_KIND_INSTRUCTION = (
+    "Compose a message built entirely on specific facts from the trigger payload "
+    "(numbers, dates, names, stats). Pick the single most compelling signal and anchor the message on it. "
+    "One clear CTA. CTA: open_ended."
+)
+
+
+
+# ---------------------------------------------------------------------------
+# SYSTEM PROMPT
+# ---------------------------------------------------------------------------
+
+SYSTEM = """You are Vera, magicpin's merchant AI assistant. You compose WhatsApp messages to Indian merchants and their customers.
+
+SCORING DIMENSIONS (all five must score 9+):
+1. SPECIFICITY — Your message MUST contain at least one verifiable fact from the context:
+   - A real number (%, count, price, days, km, trial_n)
+   - A real date or deadline
+   - A source citation (JIDA Oct 2026 p.14, DCI, etc.)
+   - A named local fact (competitor name, venue, locality)
+   PENALTY: Generic phrases like 'increase your sales' or 'boost visibility' with no numbers = score 0-2.
+   GOLD STANDARD: '190 searches for Dental Check-Up in Lajpat Nagar — 0 found you. Should I fix this?'
+
+2. CATEGORY FIT — Match voice to business type:
+   - dentists/pharmacies: clinical peer tone, technical vocab OK, NO cure/guaranteed/100%
+   - salons: warm, practical, friendly
+   - restaurants: operator-to-operator, food-focused
+   - gyms: coaching, motivational
+
+3. MERCHANT FIT — Use their real name, real numbers, real active offers. Honor language.
+
+4. DECISION QUALITY — Message must clearly say WHY NOW (the trigger reason). Not generic.
+
+5. ENGAGEMENT COMPULSION — Exactly ONE CTA. Use loss aversion, curiosity, social proof, or effort externalization.
+
+HARD RULES:
+- Hindi-English code-mix (Hinglish) when merchant languages include 'hi' or 'hi-en mix'
+- Use service+price (Haircut @ ₹99) NOT discount-style (10% off)
+- No preambles ('I hope you're well')
+- No re-introducing yourself after first message
+- No fabricated data — only use what is in the context
+- Binary YES/STOP CTA for action triggers; open-ended or none for info triggers
+- Keep it WhatsApp-short (2-5 sentences max)
+
+RESPOND WITH EXACTLY THIS JSON (no markdown, no text outside JSON):
+{
+  "body": "<the WhatsApp message>",
+  "cta": "binary_yes_stop" | "open_ended" | "none",
+  "send_as": "vera" | "merchant_on_behalf",
+  "suppression_key": "<trigger_kind>:<merchant_id>:<YYYY-WNN>",
+  "rationale": "<1-2 sentences: which specific number you used and which lever>"
+}"""
 
 
 # ---------------------------------------------------------------------------
@@ -142,84 +318,116 @@ def _build_prompt(
     kind = trigger.get("kind", "unknown")
     kind_instr = KIND_INSTRUCTIONS.get(kind, DEFAULT_KIND_INSTRUCTION)
 
-    # Category essentials
+    # ── Category block ───────────────────────────────────────────────────────
     voice = category.get("voice", {})
+    peer_stats = category.get("peer_stats", {})
     cat_block = (
         f"Category: {category.get('slug')}\n"
         f"Voice tone: {voice.get('tone', 'peer')}\n"
         f"Taboo words: {voice.get('vocab_taboo', [])}\n"
-        f"Offer catalog examples: {[o.get('title') for o in category.get('offer_catalog', [])[:4]]}\n"
-        f"Peer stats: {json.dumps(category.get('peer_stats', {}))}\n"
+        f"Offer catalog (use these service+price formats): "
+        f"{[o.get('title') for o in category.get('offer_catalog', [])[:5]]}\n"
+        f"Peer stats: avg_rating={peer_stats.get('avg_rating')}, "
+        f"avg_reviews={peer_stats.get('avg_reviews')}, "
+        f"avg_ctr={peer_stats.get('avg_ctr')}\n"
     )
 
-    # Digest top item if trigger references it
-    top_item_id = trigger.get("payload", {}).get("top_item_id")
+    # ── Digest item lookup (surfaces trial_n, %, source for specificity) ─────
+    payload = trigger.get("payload", {})
+    top_item_id = payload.get("top_item_id")
     digest_item = ""
     if top_item_id:
         for d in category.get("digest", []):
             if d.get("id") == top_item_id:
-                digest_item = f"Digest item: {json.dumps(d)}\n"
+                digest_item = (
+                    f"KEY DIGEST ITEM (use these exact numbers in the message):\n"
+                    f"  Title: {d.get('title')}\n"
+                    f"  Source: {d.get('source')}\n"
+                    f"  trial_n: {d.get('trial_n')}\n"
+                    f"  Stat: {json.dumps({k: v for k, v in d.items() if k not in ('id','kind','title','source')})}\n"
+                )
                 break
     if not digest_item and category.get("digest"):
-        digest_item = f"Latest digest item: {json.dumps(category['digest'][0])}\n"
+        d = category["digest"][0]
+        digest_item = (
+            f"Latest digest item (use these numbers): "
+            f"{d.get('title')} — source: {d.get('source')}, "
+            f"trial_n={d.get('trial_n')}, detail={json.dumps({k:v for k,v in d.items() if k not in ('id','kind','title','source')})}\n"
+        )
 
-    # Merchant essentials
+    # ── Seasonal / trend context ─────────────────────────────────────────────
+    seasonal = category.get("seasonal_beats", [])
+    trends = category.get("trend_signals", [])
+    seasonal_str = ""
+    if seasonal:
+        seasonal_str = f"Seasonal beats: {json.dumps(seasonal[:2])}\n"
+    if trends:
+        seasonal_str += f"Trend signals: {json.dumps(trends[:2])}\n"
+
+    # ── Merchant block ───────────────────────────────────────────────────────
     identity = merchant.get("identity", {})
     perf = merchant.get("performance", {})
-    peer_ctr = category.get("peer_stats", {}).get("avg_ctr", 0)
+    peer_ctr = peer_stats.get("avg_ctr", 0)
     active_offers = [o["title"] for o in merchant.get("offers", []) if o.get("status") == "active"]
-    signals = merchant.get("signals", [])
     lang = identity.get("languages", ["en"])
-    lang_note = "Use Hindi-English code-mix (Hinglish)" if "hi" in lang or "hi-en mix" in lang else "Use English"
+    lang_note = "Hinglish (Hindi-English mix)" if "hi" in lang or "hi-en mix" in lang else "English"
+    delta_7d = perf.get("delta_7d", {})
 
     merchant_block = (
         f"Merchant: {identity.get('name')} ({identity.get('locality')}, {identity.get('city')})\n"
-        f"Owner first name: {identity.get('owner_first_name', '')}\n"
-        f"Language: {lang} → {lang_note}\n"
-        f"Subscription: {merchant.get('subscription', {}).get('status')} — {merchant.get('subscription', {}).get('days_remaining')} days remaining\n"
-        f"Performance (30d): views={perf.get('views')}, calls={perf.get('calls')}, CTR={perf.get('ctr')} (peer median={peer_ctr})\n"
-        f"7d delta: {perf.get('delta_7d', {})}\n"
+        f"Owner: {identity.get('owner_first_name', '')}\n"
+        f"Language: {lang_note}\n"
+        f"Subscription: {merchant.get('subscription', {}).get('status')} "
+        f"— {merchant.get('subscription', {}).get('days_remaining')} days remaining\n"
+        f"Performance 30d: views={perf.get('views')}, calls={perf.get('calls')}, "
+        f"CTR={perf.get('ctr')} (peer median={peer_ctr})\n"
+        f"7d delta: {json.dumps(delta_7d)}\n"
         f"Active offers: {active_offers}\n"
-        f"Signals: {signals}\n"
+        f"Signals: {merchant.get('signals', [])}\n"
         f"Customer aggregate: {json.dumps(merchant.get('customer_aggregate', {}))}\n"
     )
 
-    # Conversation history (for multi-turn context)
-    hist_block = ""
-    if conversation_history:
-        recent = conversation_history[-4:]
-        hist_block = "Recent conversation:\n" + "\n".join(
-            f"  [{t['from']}]: {t['body'][:120]}" for t in recent
-        ) + "\n"
-
-    # Trigger
+    # ── Trigger block — ALL payload fields explicitly surfaced ───────────────
     trigger_block = (
         f"Trigger kind: {kind}\n"
-        f"Trigger source: {trigger.get('source')} / scope: {trigger.get('scope')}\n"
         f"Urgency: {trigger.get('urgency')}\n"
-        f"Payload: {json.dumps(trigger.get('payload', {}))}\n"
+        f"Trigger payload (USE THESE EXACT VALUES in the message):\n"
+        f"{json.dumps(payload, indent=2)}\n"
         f"Suppression key: {trigger.get('suppression_key')}\n"
     )
 
-    # Customer (if present)
+    # ── Customer block ───────────────────────────────────────────────────────
     customer_block = ""
     if customer:
         cid = customer.get("identity", {})
         rel = customer.get("relationship", {})
+        prefs = customer.get("preferences", {})
         customer_block = (
             f"Customer: {cid.get('name')} | language: {cid.get('language_pref')}\n"
-            f"State: {customer.get('state')} | last visit: {rel.get('last_visit')} | visits: {rel.get('visits_total')}\n"
-            f"Services: {rel.get('services_received', [])}\n"
-            f"Consent scope: {customer.get('consent', {}).get('scope', [])}\n"
+            f"State: {customer.get('state')} | last visit: {rel.get('last_visit')} "
+            f"| visits_total: {rel.get('visits_total')}\n"
+            f"Services received: {rel.get('services_received', [])}\n"
+            f"Preferences: {json.dumps(prefs)}\n"
+            f"Consent: {customer.get('consent', {}).get('scope', [])}\n"
         )
 
-    return f"""=== CONTEXT ===
-{cat_block}{digest_item}
-{merchant_block}{trigger_block}{customer_block}{hist_block}
+    # ── History ──────────────────────────────────────────────────────────────
+    hist_block = ""
+    if conversation_history:
+        recent = conversation_history[-4:]
+        hist_block = "Prior conversation:\n" + "\n".join(
+            f"  [{t['from']}]: {t['body'][:120]}" for t in recent
+        ) + "\n"
 
-=== TASK ===
+    return f"""=== FULL CONTEXT ===
+{cat_block}{digest_item}{seasonal_str}
+{merchant_block}
+{trigger_block}{customer_block}{hist_block}
+=== YOUR TASK ===
 Kind instruction: {kind_instr}
 
+RULE: Your message MUST quote at least one specific number, date, or named fact from the payload above.
+Do NOT write a generic message. Do NOT invent data.
 Compose the message now. Output ONLY the JSON object."""
 
 
