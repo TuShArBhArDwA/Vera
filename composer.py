@@ -4,7 +4,7 @@ Gemini 2.0 Flash (primary) → Groq llama-3.3-70b (fallback)
 """
 
 from __future__ import annotations
-import os, json, re, time, logging
+import os, json, re, logging
 from datetime import datetime, timezone
 from typing import Optional
 from dotenv import load_dotenv
@@ -15,6 +15,15 @@ log = logging.getLogger("composer")
 # ---------------------------------------------------------------------------
 # LLM CLIENTS
 # ---------------------------------------------------------------------------
+
+# Hard per-call timeouts. The judge gives /v1/tick and /v1/reply a 30s budget
+# total, and a single tick can need up to 20 compositions in parallel — so no
+# single provider call may be allowed to sit in the SDK's own retry/backoff
+# loop for several seconds. We disable SDK-level auto-retry and impose a short
+# timeout ourselves; llm_complete()'s own Gemini→Groq fallback (below) is the
+# retry strategy, not the SDK's.
+_PROVIDER_TIMEOUT_S = 6.0
+
 
 def _gemini_complete(prompt: str, system: str) -> str:
     import google.generativeai as genai
@@ -27,14 +36,17 @@ def _gemini_complete(prompt: str, system: str) -> str:
         system_instruction=system,
         generation_config={"temperature": 0.0, "max_output_tokens": 800},
     )
-    resp = model.generate_content(prompt)
+    resp = model.generate_content(
+        prompt,
+        request_options={"timeout": _PROVIDER_TIMEOUT_S},
+    )
     return resp.text
 
 
 
 def _groq_complete(prompt: str, system: str) -> str:
     from groq import Groq
-    client = Groq(api_key=os.environ["GROQ_API_KEY"])
+    client = Groq(api_key=os.environ["GROQ_API_KEY"], max_retries=0, timeout=_PROVIDER_TIMEOUT_S)
     model_name = os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile")
     resp = client.chat.completions.create(
         model=model_name,
@@ -49,7 +61,8 @@ def _groq_complete(prompt: str, system: str) -> str:
 
 
 def llm_complete(prompt: str, system: str) -> str:
-    """Try Gemini first; fall back to Groq on any error."""
+    """Try Gemini first; fall back to Groq on any error. Each provider gets one
+    fast-fail attempt (see _PROVIDER_TIMEOUT_S) — no internal retry storms."""
     if os.getenv("GEMINI_API_KEY"):
         try:
             return _gemini_complete(prompt, system)
@@ -470,8 +483,9 @@ def _parse_output(raw: str, trigger: dict, merchant: dict, category: dict) -> di
     if trigger.get("scope") == "customer":
         send_as = "merchant_on_behalf"
 
-    # suppression_key fallback
-    suppression_key = data.get("suppression_key") or trigger.get("suppression_key", "")
+    # suppression_key — the trigger's canonical key is authoritative (LLM-invented
+    # keys drift in format and break dedup/suppression matching across ticks)
+    suppression_key = trigger.get("suppression_key") or data.get("suppression_key") or ""
 
     return {
         "body": body,
@@ -496,37 +510,53 @@ def compose(
     """
     Compose a WhatsApp message from the 4 context dicts.
     Returns: {body, cta, send_as, suppression_key, rationale}
+
+    Never raises — any failure (prompt building, LLM call, parsing) falls
+    through to a grounded hard fallback so a trigger is never silently dropped.
+
+    Single pass only (no outer retry-with-sleep): llm_complete() already tries
+    Gemini then Groq internally, and a tick can need up to 20 of these calls
+    in parallel over a 10-worker pool — a retry loop with sleeps here would
+    let one slow/rate-limited trigger blow the whole tick's 30s budget for
+    everyone behind it in the queue. Fail fast to the hard fallback instead.
     """
-    prompt = _build_prompt(category, merchant, trigger, customer, conversation_history)
+    try:
+        prompt = _build_prompt(category, merchant, trigger, customer, conversation_history)
+        raw = llm_complete(prompt, SYSTEM)
+        return _parse_output(raw, trigger, merchant, category)
+    except Exception as e:
+        log.warning("Compose failed, using hard fallback: %s", e)
 
-    for attempt in range(2):
-        try:
-            raw = llm_complete(prompt, SYSTEM)
-            result = _parse_output(raw, trigger, merchant, category)
-            return result
-        except Exception as e:
-            log.warning("Compose attempt %d failed: %s", attempt + 1, e)
-            if attempt == 0:
-                time.sleep(1)
+    return _hard_fallback(category, merchant, trigger)
 
-    # Hard fallback — use actual trigger/merchant data for specificity
+
+def _hard_fallback(category: dict, merchant: dict, trigger: dict) -> dict:
+    """Grounded, non-LLM fallback — always returns a real, specific action.
+
+    Numbers come from trigger.payload first — that's the authoritative "why
+    now" data (e.g. perf_dip's actual metric+delta_pct+vs_baseline), not
+    merchant.performance, which tracks a different rolling window/metric and
+    is frequently 0 or unrelated to the metric the trigger actually fired on.
+    """
     identity = merchant.get("identity", {})
     name = identity.get("owner_first_name") or identity.get("name", "there")
     kind = trigger.get("kind", "update")
-    perf = merchant.get("performance", {})
-    ctr = perf.get("ctr", 0)
-    peer_ctr = category.get("peer_stats", {}).get("avg_ctr", 0)
-    active_offers = [o["title"] for o in merchant.get("offers", []) if o.get("status") == "active"]
+    payload = trigger.get("payload") or {}
+    active_offers = [o["title"] for o in (merchant.get("offers") or []) if o.get("status") == "active"]
     offer_str = active_offers[0] if active_offers else ""
     if kind in ("perf_dip", "perf_spike"):
-        delta = perf.get("delta_7d", {}).get("ctr", 0)
+        metric = payload.get("metric", "performance")
+        delta = payload.get("delta_pct") or 0
+        baseline = payload.get("vs_baseline")
         direction = "upar" if delta >= 0 else "neeche"
-        body = (f"{name} ji, aapka CTR is hafte {abs(delta)*100:.1f}% {direction} gaya hai "
-                f"(abhi {ctr:.1%} vs peer median {peer_ctr:.1%}). "
-                f"Main ek quick fix suggest kar sakti hoon — dekhna chahenge?")
+        baseline_clause = f" (baseline {baseline} vs ab {round(baseline * (1 + delta)) if baseline is not None else '?'})" if baseline is not None else ""
+        body = (f"{name} ji, aapka {metric} is hafte {abs(delta) * 100:.0f}% {direction} gaya hai"
+                f"{baseline_clause}. Main ek quick fix suggest kar sakti hoon — dekhna chahenge?")
     elif kind == "renewal_due":
-        days = merchant.get("subscription", {}).get("days_remaining", "?")
-        body = (f"{name} ji, aapka magicpin subscription sirf {days} din mein expire ho raha hai. "
+        days = payload.get("days_remaining", merchant.get("subscription", {}).get("days_remaining", "?"))
+        amount = payload.get("renewal_amount")
+        amount_clause = f" (₹{amount})" if amount else ""
+        body = (f"{name} ji, aapka magicpin subscription sirf {days} din mein expire ho raha hai{amount_clause}. "
                 f"Renew na karne par visibility aur leads band ho jayenge. Abhi renew karein?")
     elif offer_str:
         body = (f"{name} ji, {offer_str} — is offer ko lekar main ek targeted campaign ready kar "
@@ -604,13 +634,18 @@ def compose_reply(
                     "rationale": "Detected repeated auto-reply after probe — exiting gracefully"}
 
         if effective_auto_count == 1 and is_auto:
-            # First auto-reply — send exactly ONE probe
+            # First auto-reply — send exactly ONE probe, grounded in a real fact
+            # (never a bare template) so it doesn't read as a second generic blast.
             identity = merchant.get("identity", {})
             name = identity.get("owner_first_name") or identity.get("name", "")
-            probe = (f"Samajh gayi! {name} ji, kya aap personally dekhna chahenge ki main "
-                     f"kya suggest kar rahi hoon? 2 minute ka kaam hai. Chalega?")
+            active_offers = [o["title"] for o in (merchant.get("offers") or []) if o.get("status") == "active"]
+            trig_kind = (trigger or {}).get("kind", "")
+            hook = active_offers[0] if active_offers else trig_kind.replace("_", " ")
+            hook_clause = f" {hook} ke baare mein" if hook else ""
+            probe = (f"Samajh gayi! {name} ji, kya aap personally 2 minute dekh sakte hain"
+                     f"{hook_clause}? Main abhi ready hoon.")
             return {"action": "send", "body": probe, "cta": "binary_yes_stop",
-                    "rationale": "First auto-reply detected — sending one probe to reach real owner"}
+                    "rationale": "First auto-reply detected — sending one grounded probe to reach real owner"}
 
     # Hostile / not-interested detection
     hostile_patterns = [
@@ -651,6 +686,9 @@ def compose_reply(
             f"| preferences: {customer.get('preferences', {})}\n"
         )
 
+    trigger = trigger or {}
+    trigger_payload_str = json.dumps(trigger.get("payload", {})) if trigger.get("payload") else ""
+
     # ── CUSTOMER-FACING REPLY PATH ──────────────────────────────────────────
     if from_role == "customer":
         customer_system = """You are Vera, replying ON BEHALF OF THE MERCHANT to a customer WhatsApp message.
@@ -660,9 +698,10 @@ CRITICAL RULES:
 2. SLOT BOOKING: Customer picks a date/time → confirm it explicitly with the exact date+time they gave.
    Example: "Perfect! Confirmed for Wed 5 Nov at 6pm. See you then! 🦷"
 3. NEVER mention "magicpin dashboard" or internal merchant tools to the customer.
-4. Keep it 1-3 sentences. Warm, helpful, merchant-representative tone.
-5. Match customer's language preference (hi-en mix if applicable).
-6. ALWAYS accept the date/time as valid. NEVER say it's in the past.
+4. Cite a real number/price/slot from context below — never a vague "we'll be in touch".
+5. Keep it 1-3 sentences. Warm, helpful, merchant-representative tone.
+6. Match customer's language preference (hi-en mix if applicable).
+7. ALWAYS accept the date/time as valid. NEVER say it's in the past.
 
 Output ONLY this JSON:
 {"action": "send"|"end", "body": "<reply>", "cta": "open_ended"|"none", "rationale": "<1 sentence>"}"""
@@ -672,6 +711,7 @@ Accept ALL dates/times as valid.
 
 Merchant: {identity.get('name')} ({identity.get('city')})
 Active offers: {active_offers}
+{f"Relevant trigger context (use these exact values): {trigger_payload_str}" if trigger_payload_str else ""}
 {customer_block}
 Conversation so far:
 {history_text}
@@ -701,31 +741,31 @@ Reply as the merchant to this customer."""
             "rationale": "Fallback customer reply",
         }
 
-    # ── MERCHANT COMMITMENT FAST-PATH ───────────────────────────────────────
-    if is_commitment:
-        name = identity.get("owner_first_name") or identity.get("name", "")
-        offers_str = active_offers[0] if active_offers else "your campaign"
-        action_body = (
-            f"Done! Main {offers_str} abhi set up kar rahi hoon. "
-            f"Aapke magicpin dashboard par 10-15 minute mein details aa jayenge."
-        )
-        return {
-            "action": "send",
-            "body": action_body,
-            "cta": "none",
-            "rationale": "Merchant committed — switching to action mode immediately",
-        }
+    # ── MERCHANT REPLY PATH — always LLM-composed and fully grounded ────────
+    # (No hardcoded fast-path here: a templated "Done! Main X set up kar rahi
+    # hoon" repeated across every commit reply is exactly the kind of generic,
+    # repeated body that caps specificity/engagement scores — see
+    # examples/case-studies.md pattern #10. Instead we tell the LLM to act
+    # immediately, but with the real numbers to act on.)
+    perf = merchant.get("performance") or {}
+    peer_ctr = (category.get("peer_stats") or {}).get("avg_ctr")
 
     system_reply = """You are Vera responding in a live WhatsApp conversation with a merchant.
 
 CRITICAL RULES:
 1. COMMITMENT (yes/ok/let's do/go ahead/proceed/sure/sounds good/that works):
-   - IMMEDIATELY confirm the action. State what you are doing right now.
+   - IMMEDIATELY confirm the action. State what you are doing right now, citing a
+     specific number/offer/date from the context below. Never a bare "Done, setting it up."
    - DO NOT ask qualifying questions.
-2. DATE/TIME: ALWAYS accept as valid. NEVER say a date is in the past.
-3. Factual question: answer directly from context. No hedging.
-4. Keep it 1-4 sentences. Hinglish if merchant uses Hindi.
-5. NEVER re-introduce yourself. Never hallucinate data.
+2. REQUEST OR STATED NEED (merchant describes a problem, asks for help, or asks "what would it look like"):
+   - Do NOT ask another broad qualifying question back.
+   - Give ONE concrete next step, draft, or partial answer immediately, grounded in
+     the context below (an offer, a number, a category resource). A narrow yes/no
+     follow-up is fine; a re-qualifying open question is not.
+3. DATE/TIME: ALWAYS accept as valid. NEVER say a date is in the past.
+4. Factual question: answer directly from context. No hedging.
+5. Keep it 1-4 sentences. Hinglish if merchant uses Hindi.
+6. NEVER re-introduce yourself. Never hallucinate data — only cite numbers given below.
 
 Output ONLY this JSON:
 {"action": "send"|"wait"|"end", "body": "<reply>", "cta": "binary_yes_stop"|"open_ended"|"none", "rationale": "<1 sentence>"}"""
@@ -734,13 +774,17 @@ Output ONLY this JSON:
 IMPORTANT: Accept ALL dates provided by the user as valid. Do NOT say any date is in the past.
 
 Merchant: {identity.get('name')} ({identity.get('city')})
+Performance 30d: views={perf.get('views')}, calls={perf.get('calls')}, ctr={perf.get('ctr')} (peer median={peer_ctr})
+7d delta: {json.dumps(perf.get('delta_7d', {}))}
 Active offers: {active_offers}
 Signals: {merchant.get('signals', [])}
+{f"Trigger that started this conversation ({trigger.get('kind', '')}): {trigger_payload_str}" if trigger_payload_str else ""}
 {customer_block}
 Conversation so far:
 {history_text}
 
 Incoming message (from merchant): "{merchant_message}"
+{"The merchant just COMMITTED — apply rule 1 now." if is_commitment else ""}
 
 Compose your reply to the MERCHANT."""
 
@@ -758,5 +802,12 @@ Compose your reply to the MERCHANT."""
     except Exception as e:
         log.warning("Reply compose failed: %s", e)
 
-    return {"action": "send", "body": "Got it! Main abhi iske baare mein details share karti hoon.",
-            "cta": "open_ended", "rationale": "Fallback reply"}
+    name = identity.get("owner_first_name") or identity.get("name", "")
+    offer_hook = active_offers[0] if active_offers else ""
+    fallback_body = (
+        f"Got it {name} ji — {offer_hook} ke baare mein abhi details bhejti hoon."
+        if offer_hook else
+        f"Got it {name} ji — 2 minute mein details bhejti hoon."
+    )
+    return {"action": "send", "body": fallback_body,
+            "cta": "open_ended", "rationale": "Fallback reply after LLM error — grounded on real merchant/offer name"}

@@ -200,8 +200,31 @@ async def tick(body: TickBody):
         try:
             return args, compose(category, merchant, trigger, customer)
         except Exception as e:
-            log.error("Compose error for trigger %s: %s", trg_id, e)
-            return args, None
+            # compose() already guards itself with a hard fallback, so this should
+            # be unreachable — but a trigger must never be silently dropped from a
+            # tick just because of a compose bug, so build a minimal grounded
+            # action by hand as a last resort.
+            log.error("Compose error for trigger %s (unexpected — compose() should not raise): %s", trg_id, e)
+            identity = (merchant or {}).get("identity", {})
+            name = identity.get("owner_first_name") or identity.get("name", "there")
+            active_offers = [o["title"] for o in (merchant or {}).get("offers", []) if o.get("status") == "active"]
+            offer_str = active_offers[0] if active_offers else ""
+            kind = trigger.get("kind", "update")
+            body = (f"{name} ji, aapke {kind.replace('_', ' ')} ko lekar ek update hai"
+                    f"{' — ' + offer_str if offer_str else ''}. Dekhna chahenge?")
+            return args, {
+                "body": body, "cta": "binary_yes_stop", "send_as": "vera",
+                "suppression_key": trigger.get("suppression_key", ""),
+                "rationale": "Emergency fallback after compose() error — kept trigger from being dropped",
+            }
+
+    if not eligible:
+        # Nothing eligible this tick (already suppressed, or context not yet
+        # pushed) — this is a valid, rewarded outcome per the brief, not an
+        # error. ThreadPoolExecutor(max_workers=0) would raise ValueError, so
+        # short-circuit here instead of building an executor for zero tasks.
+        log.info("Tick: no eligible triggers this cycle — returning empty actions[]")
+        return {"actions": []}
 
     loop = asyncio.get_event_loop()
     executor = ThreadPoolExecutor(max_workers=min(len(eligible), 10))
@@ -274,7 +297,7 @@ async def reply(body: ReplyBody):
             "probe_sent": False,
         }
         conv = conversations[conv_id]
-        auto_reply_counters.setdefault(conv_id, 0)
+        auto_reply_counters.setdefault(merchant_id or conv_id, 0)
 
     # Snapshot history BEFORE appending the incoming message
     # (compose_reply does its own auto-reply count on prior turns;

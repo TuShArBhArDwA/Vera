@@ -37,7 +37,7 @@ LLM_MODEL = "llama-3.3-70b-versatile"  # <-- Optional: specify model or leave em
 OLLAMA_URL = "http://localhost:11434"
 
 # Which test to run by default
-TEST_SCENARIO = "full"
+TEST_SCENARIO = "full_evaluation"
 
 # =============================================================================
 # ██████  END OF CONFIGURATION - DON'T EDIT BELOW THIS LINE ██████
@@ -175,7 +175,7 @@ class OpenAIProvider(LLMProvider):
         req = urlrequest.Request(
             "https://api.openai.com/v1/chat/completions",
             data=body,
-            headers={"Authorization": f"Bearer {self.api_key}", "Content-Type": "application/json"}
+            headers={"Authorization": f"Bearer {self.api_key}", "Content-Type": "application/json", "User-Agent": "Mozilla/5.0"}
         )
         resp = urlrequest.urlopen(req, timeout=TIMEOUT_LLM)
         data = json.loads(resp.read().decode("utf-8"))
@@ -247,7 +247,7 @@ class DeepSeekProvider(LLMProvider):
             "https://api.deepseek.com/v1/chat/completions",
             data=json.dumps({"model": self.model, "messages": messages,
                             "temperature": 0.2, "max_tokens": 1500}).encode("utf-8"),
-            headers={"Authorization": f"Bearer {self.api_key}", "Content-Type": "application/json"}
+            headers={"Authorization": f"Bearer {self.api_key}", "Content-Type": "application/json", "User-Agent": "Mozilla/5.0"}
         )
         resp = urlrequest.urlopen(req, timeout=TIMEOUT_LLM)
         data = json.loads(resp.read().decode("utf-8"))
@@ -272,7 +272,7 @@ class GroqProvider(LLMProvider):
             "https://api.groq.com/openai/v1/chat/completions",
             data=json.dumps({"model": self.model, "messages": messages,
                             "temperature": 0.2, "max_tokens": 1500}).encode("utf-8"),
-            headers={"Authorization": f"Bearer {self.api_key}", "Content-Type": "application/json"}
+            headers={"Authorization": f"Bearer {self.api_key}", "Content-Type": "application/json", "User-Agent": "Mozilla/5.0"}
         )
         resp = urlrequest.urlopen(req, timeout=TIMEOUT_LLM)
         data = json.loads(resp.read().decode("utf-8"))
