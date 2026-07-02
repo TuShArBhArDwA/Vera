@@ -640,10 +640,14 @@ def _hard_fallback(category: dict, merchant: dict, trigger: dict) -> dict:
     else:
         body = (f"{name} ji, aapke magicpin profile mein ek important update hai. "
                 f"Main details share karoon?")
+    # Customer-facing triggers are sent from the merchant's number, not as Vera.
+    send_as = "merchant_on_behalf" if trigger.get("scope") == "customer" else "vera"
+    # Slot-pick / booking kinds read better as an open choice than a yes/stop.
+    cta = "open_ended" if kind in ("recall_due", "appointment_tomorrow", "trial_followup") else "binary_yes_stop"
     return {
         "body": body,
-        "cta": "binary_yes_stop",
-        "send_as": "vera",
+        "cta": cta,
+        "send_as": send_as,
         "suppression_key": trigger.get("suppression_key", "fallback"),
         "rationale": f"Fallback message (LLM failed) — anchored on {kind} trigger with real merchant metrics",
     }
