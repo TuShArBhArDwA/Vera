@@ -125,6 +125,11 @@ async def healthz():
     }
 
 
+# Captured once at process startup — a fixed deploy marker, not "now" on every
+# call, so this endpoint can actually be used to verify which build is live.
+DEPLOYED_AT = datetime.utcnow().isoformat() + "Z"
+
+
 @app.get("/v1/metadata")
 async def metadata():
     return {
@@ -133,8 +138,8 @@ async def metadata():
         "model": "gemini-2.5-flash (primary) + groq/llama-3.3-70b (fallback)",
         "approach": "4-context composer with trigger-kind routing, auto-reply detection, intent-transition handling",
         "contact_email": "tusharbhardwaj2617@gmail.com",
-        "version": "1.0.0",
-        "submitted_at": datetime.utcnow().isoformat() + "Z",
+        "version": "1.1.0",
+        "submitted_at": DEPLOYED_AT,
     }
 
 
