@@ -15,7 +15,7 @@ Our bot processes real-time event contexts to drive proactive messaging and hand
 
 ### Key Features
 1. **Dynamic LLM Composer Engine**:
-   - The bot dynamically composes messages using an LLM (Gemini 2.5 Flash as primary, with a seamless fallback to Groq `llama-3.3-70b` for rate limiting/timeout mitigation).
+   - The bot dynamically composes messages using an LLM (Groq `llama-3.3-70b` as primary — ~1-2s latency and reliable JSON, with a seamless fallback to Gemini 2.5 Flash for rate-limit/outage resilience).
    - Strict adherence to the 5 evaluation dimensions: Decision Quality, Specificity, Category Fit, Merchant Fit, and Engagement Compulsion.
    - Intelligent trigger-kind routing logic that applies specific psychological levers (e.g., loss aversion, social proof, effort externalization).
 

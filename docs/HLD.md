@@ -18,8 +18,8 @@ graph TD
     end
 
     subgraph LLM Providers
-        gemini[Primary: Gemini 2.5 Flash]
-        groq[Fallback: Groq LLaMA 3.3 70b]
+        groq[Primary: Groq LLaMA 3.3 70b]
+        gemini[Fallback: Gemini 2.5 Flash]
     end
 
     JS -- "/v1/context (Push)" --> api
@@ -29,8 +29,8 @@ graph TD
     api <-->|Read/Write State| store
     api -->|Context + History| comp
     
-    comp -->|1. Generate Content| gemini
-    comp -.->|2. Rate Limit Fallback| groq
+    comp -->|1. Generate Content| groq
+    comp -.->|2. Failover| gemini
 ```
 
 ## 3. Core Components
@@ -50,10 +50,10 @@ Given the ephemeral nature of the challenge and SLA limits, state is tracked loc
 The intelligent core of Vera. Responsibilities include:
 - **Routing**: Mapping trigger kinds (e.g., `perf_dip`, `festival_upcoming`) to precise psychological levers (loss aversion, urgency).
 - **Context Assembly**: Condensing the massive 4-layer context payload into dense, specific prompt blocks.
-- **Dual-LLM Client**: Wrapping Google GenAI (Gemini) and Groq APIs with automatic failover logic for extreme reliability.
+- **Dual-LLM Client**: Wrapping Groq (primary) and Google GenAI/Gemini (fallback) with automatic per-provider timeouts and failover logic for extreme reliability.
 - **Validation Pipeline**: Filtering taboo words, ensuring strict CTA formatting (binary vs. open-ended), and ensuring language compliance (Hinglish code-mixing).
 
 ## 4. Key Design Decisions & Trade-offs
 1. **In-Memory Storage over DB**: Prioritizes sub-millisecond lookups required for the 30s tick timeout. Given that contexts are pushed periodically and state drops on `/v1/teardown`, an external DB (Postgres/Redis) introduces unnecessary latency for the local evaluator.
 2. **Deterministic LLM Output**: Setting `temperature=0` across all LLMs ensures consistent formatting, structured JSON output stability, and predictable scoring.
-3. **Dual-LLM Strategy**: Free-tier APIs aggressively rate-limit (Gemini at 15 RPM). Groq provides sub-second latency as a fallback, ensuring the bot never misses a tick or reply window.
+3. **Dual-LLM Strategy (Groq-primary)**: Groq `llama-3.3-70b` is the primary — it returns valid JSON in ~1-2s, comfortably inside the 30s tick SLA even for a full 20-action batch. Gemini 2.5 Flash is the fallback (it is a thinking model with variable 5-13s latency, so it needs a larger output-token budget and a longer timeout — acceptable only on the rare fallback path). Each provider gets a single fast-fail attempt with its own timeout (`_GROQ_TIMEOUT_S=6`, `_GEMINI_TIMEOUT_S=15`); no SDK-level retry storms. If both fail, a grounded non-LLM fallback composes from the trigger payload so a trigger is never dropped.

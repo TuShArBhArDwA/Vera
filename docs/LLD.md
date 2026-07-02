@@ -53,14 +53,26 @@ sent_suppression_keys: Set[str]
 ## 3. Composer Module (`composer.py`)
 
 ### 3.1 LLM Client Flow
+Groq is primary (fast ~1-2s, reliable JSON); Gemini is the failover. Each
+provider gets one fast-fail attempt with its own timeout — no SDK retry loops
+that could blow the 30s tick budget under parallel load.
 ```python
+_GROQ_TIMEOUT_S = 6.0    # primary: fast, fail quick to fallback on error
+_GEMINI_TIMEOUT_S = 15.0 # fallback only: thinking model, variable 5-13s latency
+
 def llm_complete(prompt: str, system: str) -> str:
     try:
-        return _gemini_complete(prompt, system)  # Uses gemini-2.5-flash
+        return _groq_complete(prompt, system)   # llama-3.3-70b-versatile, timeout=6s
     except Exception as e:
-        log.warning("Gemini failed, falling back to Groq")
-        return _groq_complete(prompt, system)    # Uses llama-3.3-70b-versatile
+        log.warning("Groq failed, falling back to Gemini")
+        return _gemini_complete(prompt, system)  # gemini-2.5-flash, max_output_tokens=2048, timeout=15s
 ```
+> **Note:** Gemini 2.5 Flash is a *thinking* model; hidden reasoning consumes the
+> output-token budget, so `max_output_tokens=2048` is required or the JSON is
+> truncated before its closing brace. A 6s cap (used earlier for both providers)
+> silently timed out every Gemini call — hence Groq-primary and per-provider timeouts.
+> If both providers fail, `_hard_fallback()` composes a grounded message from the
+> trigger payload (real numbers/dates) so no trigger is ever dropped.
 
 ### 3.2 Trigger Routing Map (`KIND_INSTRUCTIONS`)
 Specific levers are applied based on `trigger["kind"]`:
@@ -87,4 +99,18 @@ Located inside `compose_reply()`, this runs locally via RegEx before invoking th
 It validates:
 - **Taboo words**: Checks output against `TABOO_MAP` (e.g., "cure", "guaranteed" blocked for dentists).
 - **CTA Normalization**: Forces `cta` to one of `{"binary_yes_stop", "open_ended", "none"}`.
-- **Send As**: Overrides `send_as` to `merchant_on_behalf` if trigger scope is `customer`.
+- **Send As**: Overrides `send_as` to `merchant_on_behalf` if trigger scope is `customer` (applied in both the LLM path and `_hard_fallback()`).
+- **Suppression key**: Always uses the trigger's canonical key over any LLM-invented one, to keep cross-tick dedup consistent.
+
+### 3.6 Specificity Guard
+Specificity is scored 0-2 for any message lacking a hard fact, so after parsing,
+`compose()` checks `_has_hard_fact(body)` (a digit or `₹`). If a message for a
+fact-bearing kind comes back factless, it is replaced by the grounded
+`_hard_fallback()` (which always cites real payload numbers). Genuinely open
+kinds (`curious_ask_due`, `dormant_with_vera`) are exempt.
+
+### 3.7 Addressing Rule (prompt-level)
+`_build_prompt()` injects an addressing directive: customer-facing messages must
+open by identifying the business + owner ("Lakshmi from Studio11, Kapra here"),
+merchant-facing messages open with the owner's first name. This directly targets
+the Merchant-Fit dimension and mirrors the scored case-study anchors.
