@@ -17,36 +17,30 @@ log = logging.getLogger("composer")
 # ---------------------------------------------------------------------------
 
 # Hard per-call timeouts. The judge gives /v1/tick and /v1/reply a 30s budget
-# total, and a single tick can need up to 20 compositions in parallel — so no
-# single provider call may be allowed to sit in the SDK's own retry/backoff
-# loop for several seconds. We disable SDK-level auto-retry and impose a short
-# timeout ourselves; llm_complete()'s own Gemini→Groq fallback (below) is the
+# total, and a single tick can need up to 20 compositions in parallel (10-worker
+# pool) — so no single provider call may sit in the SDK's own retry/backoff loop.
+# We disable SDK-level auto-retry; llm_complete()'s Gemini→Groq fallback is the
 # retry strategy, not the SDK's.
-_PROVIDER_TIMEOUT_S = 6.0
-
-
-def _gemini_complete(prompt: str, system: str) -> str:
-    import google.generativeai as genai
-    genai.configure(api_key=os.environ["GEMINI_API_KEY"])
-    model_name = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
-    # Strip models/ prefix if present (from list_models output)
-    model_name = model_name.replace("models/", "")
-    model = genai.GenerativeModel(
-        model_name=model_name,
-        system_instruction=system,
-        generation_config={"temperature": 0.0, "max_output_tokens": 800},
-    )
-    resp = model.generate_content(
-        prompt,
-        request_options={"timeout": _PROVIDER_TIMEOUT_S},
-    )
-    return resp.text
-
+#
+# Timeouts are PER-PROVIDER: gemini-2.5-flash is a thinking model and takes ~5s
+# on a real composition prompt, so a 6s cap timed it out on EVERY call (the bot
+# then silently ran Groq-only). Gemini gets a real budget; Groq (typically 1-2s)
+# pool that keeps a full 20-action tick within ~2 waves under the 30s budget.
+#
+# Provider order is GROQ FIRST, Gemini fallback — deliberately. Measured from
+# this environment: Groq llama-3.3-70b returns valid JSON in ~1-2s and produced
+# the gold-standard-quality composes in the clean benchmark. Gemini 2.5-flash is
+# a THINKING model whose hidden reasoning (a) is slow/variable from here (5-13s)
+# and (b) eats an 800-token output budget so JSON gets truncated — it needs a
+# 2048 budget and a long timeout, which only makes sense on the rare fallback
+# path, not the hot path.
+_GEMINI_TIMEOUT_S = 15.0   # generous: fallback only, must not truncate/timeout
+_GROQ_TIMEOUT_S = 6.0      # primary: fast, fail quick to Gemini on error
 
 
 def _groq_complete(prompt: str, system: str) -> str:
     from groq import Groq
-    client = Groq(api_key=os.environ["GROQ_API_KEY"], max_retries=0, timeout=_PROVIDER_TIMEOUT_S)
+    client = Groq(api_key=os.environ["GROQ_API_KEY"], max_retries=0, timeout=_GROQ_TIMEOUT_S)
     model_name = os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile")
     resp = client.chat.completions.create(
         model=model_name,
@@ -60,17 +54,37 @@ def _groq_complete(prompt: str, system: str) -> str:
     return resp.choices[0].message.content
 
 
+def _gemini_complete(prompt: str, system: str) -> str:
+    import google.generativeai as genai
+    genai.configure(api_key=os.environ["GEMINI_API_KEY"])
+    model_name = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
+    # Strip models/ prefix if present (from list_models output)
+    model_name = model_name.replace("models/", "")
+    model = genai.GenerativeModel(
+        model_name=model_name,
+        system_instruction=system,
+        # 2048 (not 800): 2.5-flash spends output tokens on hidden thinking, so a
+        # tight budget truncates the JSON before the closing brace.
+        generation_config={"temperature": 0.0, "max_output_tokens": 2048},
+    )
+    resp = model.generate_content(
+        prompt,
+        request_options={"timeout": _GEMINI_TIMEOUT_S},
+    )
+    return resp.text
+
+
 def llm_complete(prompt: str, system: str) -> str:
-    """Try Gemini first; fall back to Groq on any error. Each provider gets one
-    fast-fail attempt (see _PROVIDER_TIMEOUT_S) — no internal retry storms."""
-    if os.getenv("GEMINI_API_KEY"):
-        try:
-            return _gemini_complete(prompt, system)
-        except Exception as e:
-            log.warning("Gemini failed (%s), falling back to Groq", e)
+    """Try Groq first (fast, reliable primary); fall back to Gemini on any error.
+    Each provider gets one fast-fail attempt — no internal retry storms."""
     if os.getenv("GROQ_API_KEY"):
-        return _groq_complete(prompt, system)
-    raise RuntimeError("No LLM provider available — set GEMINI_API_KEY or GROQ_API_KEY")
+        try:
+            return _groq_complete(prompt, system)
+        except Exception as e:
+            log.warning("Groq failed (%s), falling back to Gemini", e)
+    if os.getenv("GEMINI_API_KEY"):
+        return _gemini_complete(prompt, system)
+    raise RuntimeError("No LLM provider available — set GROQ_API_KEY or GEMINI_API_KEY")
 
 
 # ---------------------------------------------------------------------------

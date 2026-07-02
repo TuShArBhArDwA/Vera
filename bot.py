@@ -135,10 +135,10 @@ async def metadata():
     return {
         "team_name": "Mini Anon",
         "team_members": ["Tushar Bhardwaj"],
-        "model": "gemini-2.5-flash (primary) + groq/llama-3.3-70b (fallback)",
+        "model": "groq/llama-3.3-70b (primary) + gemini-2.5-flash (fallback)",
         "approach": "4-context composer with trigger-kind routing, auto-reply detection, intent-transition handling",
         "contact_email": "tusharbhardwaj2617@gmail.com",
-        "version": "1.1.0",
+        "version": "1.2.0",
         "submitted_at": DEPLOYED_AT,
     }
 
