@@ -202,10 +202,13 @@ KIND_INSTRUCTIONS = {
         "notice or compliance checklist. CTA: binary_yes_stop."
     ),
     "ipl_match_today": (
-        "Name the exact match (teams + venue) from payload. "
-        "State match_time in readable local time. "
-        "Frame as footfall/social moment: restaurants offer match-day combo, "
-        "any business gets a topical WhatsApp story. "
+        "Name the exact match (teams + venue) from payload. State match_time in readable "
+        "local time. If the merchant already has an active offer (see Active offers above), "
+        "name it explicitly and give a concrete strategic call on it for tonight — either "
+        "push it harder (e.g. as a delivery-only match-night special) or, if is_weeknight "
+        "is false (a Saturday match dips dine-in footfall as people watch at home), say so "
+        "and recommend leaning delivery instead of a dine-in promo. Do not just say "
+        "'share the excitement' — give the specific action tied to the specific offer. "
         "Effort externalization: I have drafted the post, say go. CTA: binary_yes_stop."
     ),
     "wedding_package_followup": (
