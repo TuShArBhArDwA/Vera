@@ -278,37 +278,37 @@ DEFAULT_KIND_INSTRUCTION = (
 # SYSTEM PROMPT
 # ---------------------------------------------------------------------------
 
-SYSTEM = """You are Vera, magicpin's merchant AI assistant. You compose WhatsApp messages to Indian merchants and their customers.
+SYSTEM = """You are Vera, magicpin's merchant AI assistant. You compose ONE WhatsApp message to an Indian merchant (or their customer) that they will actually reply to.
 
-SCORING DIMENSIONS (all five must score 9+):
-1. SPECIFICITY — Your message MUST contain at least one verifiable fact from the context:
-   - A real number (%, count, price, days, km, trial_n)
-   - A real date or deadline
-   - A source citation (JIDA Oct 2026 p.14, DCI, etc.)
-   - A named local fact (competitor name, venue, locality)
-   PENALTY: Generic phrases like 'increase your sales' or 'boost visibility' with no numbers = score 0-2.
-   GOLD STANDARD: '190 searches for Dental Check-Up in Lajpat Nagar — 0 found you. Should I fix this?'
+THE ONE RULE THAT DECIDES YOUR SCORE:
+Pick the SINGLE strongest signal for this moment and build the whole message around it.
+Do NOT list every fact you were given. A message that dumps 4 numbers scores WORSE than
+one that leads with the 1 number that matters and asks a sharp question. Choosing what to
+leave out is the skill being tested.
 
-2. CATEGORY FIT — Match voice to business type:
-   - dentists/pharmacies: clinical peer tone, technical vocab OK, NO cure/guaranteed/100%
-   - salons: warm, practical, friendly
-   - restaurants: operator-to-operator, food-focused
-   - gyms: coaching, motivational
-
-3. MERCHANT FIT — Use their real name, real numbers, real active offers. Honor language.
-
-4. DECISION QUALITY — Message must clearly say WHY NOW (the trigger reason). Not generic.
-
-5. ENGAGEMENT COMPULSION — Exactly ONE CTA. Use loss aversion, curiosity, social proof, or effort externalization.
+HOW EACH DIMENSION IS SCORED (0-10, aim 9+ on all):
+1. DECISION QUALITY — Did you pick the RIGHT signal to lead with, given trigger + merchant
+   state + category? The lead fact must be the one most likely to make THIS merchant act NOW.
+   Weak: restating the trigger generically. Strong: the sharpest consequence/opportunity in it.
+2. SPECIFICITY — The lead MUST be a hard, verifiable fact from context: a number (%/count/
+   price/days/km), a date/deadline, a source citation (e.g. JIDA Oct 2026 p.14, DCI), or a
+   named local fact (competitor, venue, locality). No number = score 0-2. NEVER invent one.
+   GOLD STANDARD: '190 searches for Dental Check-Up in Lajpat Nagar last week — 0 found you. Fix it?'
+3. CATEGORY FIT — dentists/pharmacies: clinical peer tone, technical vocab OK, NEVER
+   cure/guaranteed/100%. salons: warm, practical. restaurants: operator-to-operator ('covers',
+   'AOV'). gyms: coaching, motivational.
+4. MERCHANT FIT — Their real owner name, their real numbers, their real active offer (by exact
+   title). Honor their language. Reference prior conversation behaviour if given.
+5. ENGAGEMENT COMPULSION — Exactly ONE ask, and make it LOW-FRICTION: a yes/no or a single
+   choice, never an open-ended 'tell me more'. Externalize the effort ('I've drafted it — say
+   go'). Give one clear reason to reply RIGHT NOW (loss aversion, curiosity, urgency, proof).
 
 HARD RULES:
-- Hindi-English code-mix (Hinglish) when merchant languages include 'hi' or 'hi-en mix'
-- Use service+price (Haircut @ ₹99) NOT discount-style (10% off)
-- No preambles ('I hope you're well')
-- No re-introducing yourself after first message
-- No fabricated data — only use what is in the context
-- Binary YES/STOP CTA for action triggers; open-ended or none for info triggers
-- Keep it WhatsApp-short (2-5 sentences max)
+- Hinglish (Hindi-English mix) when merchant languages include 'hi' or 'hi-en mix'; else English.
+- Service+price format ('Haircut @ ₹99'), NEVER discount-style ('10% off').
+- No preambles ('I hope you're well'), no re-introducing yourself, no fabricated data.
+- Binary YES/STOP CTA for action triggers; open-ended only for genuine info/curiosity triggers.
+- Keep it tight: 2-4 short sentences. Every sentence must earn its place. Cut throat-clearing.
 
 RESPOND WITH EXACTLY THIS JSON (no markdown, no text outside JSON):
 {
@@ -316,7 +316,7 @@ RESPOND WITH EXACTLY THIS JSON (no markdown, no text outside JSON):
   "cta": "binary_yes_stop" | "open_ended" | "none",
   "send_as": "vera" | "merchant_on_behalf",
   "suppression_key": "<trigger_kind>:<merchant_id>:<YYYY-WNN>",
-  "rationale": "<1-2 sentences: which specific number you used and which lever>"
+  "rationale": "<1-2 sentences: which ONE signal you led with and which compulsion lever>"
 }"""
 
 
@@ -435,6 +435,24 @@ def _build_prompt(
             f"  [{t['from']}]: {t['body'][:120]}" for t in recent
         ) + "\n"
 
+    # ── Addressing rule — biggest recoverable merchant-fit lever ─────────────
+    owner = identity.get("owner_first_name", "")
+    biz_name = identity.get("name", "")
+    locality = identity.get("locality", "")
+    is_customer_facing = trigger.get("scope") == "customer" or customer is not None
+    if is_customer_facing:
+        addressing_rule = (
+            f"ADDRESSING (customer-facing, sent on the merchant's behalf): open by identifying "
+            f"who is messaging so the customer knows the business — e.g. '{owner or biz_name} from "
+            f"{biz_name}{(', ' + locality) if locality else ''} here'. Then address the customer by "
+            f"their first name. This is required — an unattributed message loses merchant-fit points."
+        )
+    else:
+        addressing_rule = (
+            f"ADDRESSING (merchant-facing): open with the owner's first name"
+            f"{f' ({owner})' if owner else ''} — not a generic 'Hi'. Merchant-fit is scored on this."
+        )
+
     return f"""=== FULL CONTEXT ===
 {cat_block}{digest_item}{seasonal_str}
 {merchant_block}
@@ -442,8 +460,10 @@ def _build_prompt(
 === YOUR TASK ===
 Kind instruction: {kind_instr}
 
+{addressing_rule}
+
 RULE: Your message MUST quote at least one specific number, date, or named fact from the payload above.
-Do NOT write a generic message. Do NOT invent data.
+Lead with the SINGLE strongest signal — do not list every fact. Do NOT invent data.
 Compose the message now. Output ONLY the JSON object."""
 
 
@@ -526,11 +546,38 @@ def compose(
     try:
         prompt = _build_prompt(category, merchant, trigger, customer, conversation_history)
         raw = llm_complete(prompt, SYSTEM)
-        return _parse_output(raw, trigger, merchant, category)
+        result = _parse_output(raw, trigger, merchant, category)
+
+        # Specificity guard: specificity is the dimension that historically
+        # crashed to 2/10, and a message with no hard fact (number/price/date/
+        # source) scores 0-2 there no matter how well-written. If the LLM
+        # returned a factless body for a kind that SHOULD carry one, replace it
+        # with the grounded hard fallback (which always cites real numbers) —
+        # strictly better on specificity. Genuinely open/curiosity kinds are
+        # exempt: a numberless question is the correct output for those.
+        kind = trigger.get("kind", "")
+        if kind not in _FACTLESS_OK_KINDS and not _has_hard_fact(result["body"]):
+            log.warning("Composed body for kind=%s has no hard fact — using grounded fallback", kind)
+            return _hard_fallback(category, merchant, trigger)
+        return result
     except Exception as e:
         log.warning("Compose failed, using hard fallback: %s", e)
 
     return _hard_fallback(category, merchant, trigger)
+
+
+# Kinds where a numberless message is the CORRECT output (open curiosity /
+# relationship-warming asks) — the specificity guard must not fire on these.
+_FACTLESS_OK_KINDS = {"curious_ask_due", "dormant_with_vera"}
+
+def _has_hard_fact(body: str) -> bool:
+    """True if the message carries a verifiable anchor: a digit or a ₹ price.
+    This is the floor for a non-zero specificity score. (Dates in this dataset
+    always include a day number, so a bare month-name check isn't needed and
+    would false-positive on common words like 'may'/'sep'.)"""
+    if not body:
+        return False
+    return bool(re.search(r"\d", body)) or "₹" in body
 
 
 def _hard_fallback(category: dict, merchant: dict, trigger: dict) -> dict:
@@ -561,6 +608,32 @@ def _hard_fallback(category: dict, merchant: dict, trigger: dict) -> dict:
         amount_clause = f" (₹{amount})" if amount else ""
         body = (f"{name} ji, aapka magicpin subscription sirf {days} din mein expire ho raha hai{amount_clause}. "
                 f"Renew na karne par visibility aur leads band ho jayenge. Abhi renew karein?")
+    elif kind == "recall_due":
+        # customer-facing: name the business, the due service, and offer explicit slots
+        biz = identity.get("name", "")
+        slots = payload.get("available_slots") or []
+        slot_labels = " ya ".join(s.get("label", "") for s in slots[:2] if isinstance(s, dict)) if slots else ""
+        due = payload.get("due_date", "")
+        price_clause = f" {offer_str}." if offer_str else ""
+        slot_clause = f" Slots: {slot_labels}." if slot_labels else ""
+        body = (f"Namaste! {biz} se — aapki {payload.get('service_due','recall')} "
+                f"{('due ' + str(due)) if due else 'due'} hai.{slot_clause}{price_clause} "
+                f"Kaunsa slot theek rahega?").replace("_", " ")
+    elif kind == "chronic_refill_due":
+        biz = identity.get("name", "")
+        mols = payload.get("molecule_list") or payload.get("molecules") or []
+        mol_str = ", ".join(mols[:3]) if mols else "aapki monthly medicines"
+        runout = payload.get("stock_runs_out") or payload.get("runout_date") or payload.get("due_date") or ""
+        runout_clause = f" {runout} ko khatam hongi." if runout else "."
+        body = (f"Namaste, {biz} yahan — {mol_str}{runout_clause} "
+                f"Same dose ready hai{(' — ' + offer_str) if offer_str else ''}. Dispatch kar dein? Reply CONFIRM.")
+    elif kind == "supply_alert":
+        mol = payload.get("molecule", "a medicine")
+        batches = payload.get("affected_batches") or payload.get("batches") or []
+        batch_str = ", ".join(str(b) for b in batches[:3]) if batches else ""
+        batch_clause = f" (batches {batch_str})" if batch_str else ""
+        body = (f"{name} ji, urgent: {mol}{batch_clause} par recall aaya hai. Affected patients ko "
+                f"notify karna zaroori hai. Main patient notification draft kar doon?")
     elif offer_str:
         body = (f"{name} ji, {offer_str} — is offer ko lekar main ek targeted campaign ready kar "
                 f"sakti hoon. Chalega?")
